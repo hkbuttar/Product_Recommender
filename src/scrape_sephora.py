@@ -32,9 +32,9 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Tune these for your scale
 BRAND_LIMIT = 500         # how many brands to scrape
-PRODUCTS_PER_BRAND = 20   # max product URLs per brand
+PRODUCTS_PER_BRAND = 50   # max product URLs per brand
 MAX_BRAND_SCROLLS = 40    # scroll iterations per brand page
-PRODUCT_LIMIT_TOTAL = 5000 # global cap across brands (safety)
+PRODUCT_LIMIT_TOTAL = 50000 # global cap across brands (safety)
 BRANDS_PER_SESSION = 8    # rotate browser session every N brands to avoid fingerprinting
 # Selenium timeouts
 PAGE_LOAD_SLEEP = 5

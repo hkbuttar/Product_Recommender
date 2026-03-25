@@ -32,9 +32,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Tune these for your scale
 BRAND_LIMIT = 500         # how many brands to scrape
-PRODUCTS_PER_BRAND = 50   # max product URLs per brand
+PRODUCTS_PER_BRAND = 20   # max product URLs per brand
 MAX_BRAND_SCROLLS = 40    # scroll iterations per brand page
 PRODUCT_LIMIT_TOTAL = 5000 # global cap across brands (safety)
+BRANDS_PER_SESSION = 8    # rotate browser session every N brands to avoid fingerprinting
 # Selenium timeouts
 PAGE_LOAD_SLEEP = 5
 WAIT_GRID_SECONDS = 20
@@ -48,6 +49,26 @@ WAIT_PRODUCT_SECONDS = 20
 # 1. Increase polite_sleep ranges significantly
 def polite_sleep(a=3.0, b=7.0):
     time.sleep(random.uniform(a, b))
+
+def decoy_browse(driver):
+    """Visit a non-brand page briefly to break up the crawl pattern."""
+    decoy_urls = [
+        BASE + "/",
+        BASE + "/shop/makeup",
+        BASE + "/shop/skin-care",
+        BASE + "/shop/hair",
+        BASE + "/beauty/brands-list",
+    ]
+    url = random.choice(decoy_urls)
+    print(f"  [decoy] visiting {url}")
+    try:
+        driver.get(url)
+        time.sleep(random.uniform(6, 12))
+        scroll_px = random.randint(300, 900)
+        driver.execute_script(f"window.scrollBy(0, {scroll_px});")
+        time.sleep(random.uniform(2, 5))
+    except Exception:
+        pass
 
 def norm_url(u: str) -> str:
     if not u:
@@ -120,6 +141,42 @@ def extract_price_from_json(html):
         return None
 
 
+def extract_ingredients_from_json(html: str):
+    """
+    Pull ingredients from the __NEXT_DATA__ JSON blob embedded in the page.
+    Checks currentSku.ingredients first, then regularChildSkus[0].ingredients.
+    """
+    try:
+        start = html.find("__NEXT_DATA__")
+        if start == -1:
+            return None
+
+        json_start = html.find("{", start)
+        json_end = html.find("</script>", json_start)
+        data = json.loads(html[json_start:json_end])
+
+        product = (
+            data.get("props", {})
+                .get("pageProps", {})
+                .get("product", {})
+        )
+
+        ingredients = product.get("currentSku", {}).get("ingredients")
+        if ingredients:
+            return ingredients.strip()
+
+        child_skus = product.get("regularChildSkus", [])
+        if child_skus and isinstance(child_skus, list):
+            ingredients = child_skus[0].get("ingredients")
+            if ingredients:
+                return ingredients.strip()
+
+        return None
+
+    except Exception:
+        return None
+
+
 # -------------------------
 # Selenium driver
 # -------------------------
@@ -136,11 +193,19 @@ def make_driver(headless=False):
     driver = uc.Chrome(options=options, headless=headless)
     driver.set_page_load_timeout(60)
 
-    # Warm-up — visit homepage and browse a bit like a real user
+    # Warm-up — mimic a real user landing on the site
     driver.get(BASE + "/")
-    time.sleep(10)
-    driver.execute_script("window.scrollBy(0, 300);")
-    time.sleep(3)
+    time.sleep(random.uniform(8, 14))
+    driver.execute_script("window.scrollBy(0, 400);")
+    time.sleep(random.uniform(2, 4))
+    driver.execute_script("window.scrollBy(0, 600);")
+    time.sleep(random.uniform(1, 3))
+    # Occasionally visit a category page before starting brand crawl
+    if random.random() < 0.5:
+        driver.get(BASE + "/shop/skin-care")
+        time.sleep(random.uniform(5, 9))
+        driver.execute_script("window.scrollBy(0, 800);")
+        time.sleep(random.uniform(2, 4))
     return driver
 
 # -------------------------
@@ -239,9 +304,10 @@ def scroll_and_collect_product_links(driver, limit=50, max_scrolls=20):
                 if len(product_urls) >= limit:
                     return product_urls
 
-        # scroll down to trigger lazy loading
-        driver.execute_script("window.scrollBy(0, document.body.scrollHeight);")
-        time.sleep(2.5)
+        # Scroll incrementally — jumping to the bottom skips intermediate
+        # lazy-load triggers on Sephora's infinite grid.
+        driver.execute_script("window.scrollBy(0, 1200);")
+        time.sleep(random.uniform(3.0, 6.0))
 
         # detect stagnation
         if len(product_urls) == last_count:
@@ -250,8 +316,8 @@ def scroll_and_collect_product_links(driver, limit=50, max_scrolls=20):
             stagnant_rounds = 0
             last_count = len(product_urls)
 
-        # if we stop getting new products for a few scrolls, break
-        if stagnant_rounds >= 3:
+        # allow more patience before giving up
+        if stagnant_rounds >= 6:
             break
 
     return product_urls
@@ -281,7 +347,8 @@ def get_product_urls_from_brand(driver, brand_url, limit=50):
             return []
 
         if is_access_denied(html):
-            print("Access Denied detected. Skipping brand.")
+            print("Access Denied detected. Waiting before skipping...")
+            time.sleep(random.uniform(60, 120))
             return []
 
         # Wait for something that indicates product listing exists.
@@ -634,6 +701,8 @@ def main():
     seen_product_ids = set(all_existing_pids)
     new_products_this_run = 0
 
+    brands_this_session = 0
+
     for brand_url in brand_urls:
         brand_slug = brand_url.rstrip("/").split("/")[-1].lower()
 
@@ -646,16 +715,39 @@ def main():
             print("Reached global product cap; stopping.")
             break
 
+        # --- Proactive session rotation every BRANDS_PER_SESSION brands ---
+        if brands_this_session > 0 and brands_this_session % BRANDS_PER_SESSION == 0:
+            print(f"\nRotating browser session after {brands_this_session} brands...")
+            driver.quit()
+            cooldown = random.uniform(45, 90)
+            print(f"Cooling down for {cooldown:.0f}s...")
+            time.sleep(cooldown)
+            driver = make_driver(headless=False)
+            brands_this_session = 0
+
+        # --- Occasional decoy browse between brands ---
+        elif brands_this_session > 0 and random.random() < 0.25:
+            decoy_browse(driver)
+
+        # --- Inter-brand cooldown ---
+        if brands_this_session > 0:
+            inter_brand_sleep = random.uniform(20, 45)
+            print(f"  [pause] {inter_brand_sleep:.0f}s before next brand...")
+            time.sleep(inter_brand_sleep)
+
         print(f"\nBrand: {brand_url}")
 
         product_urls = get_product_urls_from_brand(driver, brand_url, limit=PRODUCTS_PER_BRAND)
         if not product_urls:
             if is_access_denied(driver.page_source):
-                print("Access Denied! Restarting browser with fresh session...")
+                print("Access Denied! Restarting browser and cooling down...")
                 driver.quit()
-                time.sleep(random.uniform(60, 90))
+                cooldown = random.uniform(180, 300)
+                print(f"Cooling down for {cooldown:.0f}s...")
+                time.sleep(cooldown)
                 driver = make_driver(headless=False)
-                # Retry this brand once with the new session
+                brands_this_session = 0
+                # Retry this brand once with the fresh session
                 product_urls = get_product_urls_from_brand(driver, brand_url, limit=PRODUCTS_PER_BRAND)
 
             if not product_urls:
@@ -664,6 +756,8 @@ def main():
                 with open(brands_done_path, "a") as f:
                     f.write(brand_slug + "\n")
                 continue
+
+        brands_this_session += 1
 
         # Early exit: if first 3 real products are all already known, skip this brand
         first_pids = []

@@ -242,6 +242,12 @@ def combine(
     sephora["source"] = "sephora"
     ulta["source"]    = "ulta"
 
+    # Sephora appends brand/variant suffixes after the last " - "
+    # e.g. "Moisture Lock Styling Curl Butter - Ouidad" -> "Moisture Lock Styling Curl Butter"
+    sephora["product_name"] = sephora["product_name"].apply(
+        lambda n: n.rsplit(" - ", 1)[0].strip() if isinstance(n, str) and " - " in n else n
+    )
+
     sephora["category"] = sephora["category"].apply(_normalise_category)
     ulta["category"]    = ulta["category"].apply(_normalise_category)
 

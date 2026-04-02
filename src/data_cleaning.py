@@ -118,62 +118,87 @@ def _clean_token(token: str) -> str:
 
     Patterns handled
     ----------------
-    #01: mica                           →  mica
-    #01: synthetic fluorphlogopite      →  synthetic fluorphlogopite
-    #09247/a alcohol                    →  alcohol      (CI color code)
-    #16153 aqua (water)                 →  aqua (water)
-    #1: calcium aluminum borosilicate   →  calcium aluminum borosilicate
-    "aqua/water/eau                     →  aqua/water/eau
-    'diisostearyl malate                →  diisostearyl malate
-    'serine                             →  serine
-    &nbsp; glycerin                     →  glycerin  (entities decoded earlier)
-    ( base coat inci:) di-hema …        →  di-hema …
-    (* step 2: water/aqua/eau           →  water/aqua/eau
-    (+/ all access: kaolin              →  kaolin
-    (+/ big deal: mica                  →  mica
-    ( nutritive cream: water            →  water
-    ( theobroma cacao )                 →  theobroma cacao
-    (   (lone bracket)                  →  ''  (dropped)
-    (+/ (lone prefix)                   →  ''  (dropped)
-    curl gel: water/aqua/eau            →  water/aqua/eau
-    'replica' beach walk … : alcohol    →  alcohol
-    'i can begin' shampoo: water (aqua) →  water (aqua)
-    ingredients/ingrédients: alcohol    →  alcohol  (belt-and-suspenders)
+    #01: mica                                    →  mica
+    #09247/a alcohol                             →  alcohol      (CI color code)
+    #16153 aqua (water)                          →  aqua (water)
+    "aqua/water/eau                              →  aqua/water/eau
+    'serine                                      →  serine
+    &nbsp; glycerin                              →  glycerin  (entities decoded earlier)
+    & red 7 (ci 15850)                           →  red 7 (ci 15850)
+    & xanthan gum                                →  xanthan gum
+    ( base coat inci:) di-hema …                 →  di-hema …
+    (* step 2: water/aqua/eau                    →  water/aqua/eau
+    (+/ all access: kaolin                       →  kaolin
+    (+/-): titanium dioxide ci 77891             →  titanium dioxide ci 77891
+    (+/ the list of ingredients is subject …     →  ''  (dropped — disclaimer)
+    ( theobroma cacao )                          →  theobroma cacao
+    (   (lone bracket)                           →  ''  (dropped)
+    (+/                                          →  ''  (dropped)
+    (1%); hydrolyzed pea protein                 →  hydrolyzed pea protein
+    (1) polybutylene terephthalate               →  polybutylene terephthalate
+    curl gel: water/aqua/eau                     →  water/aqua/eau
+    'replica' beach walk … : alcohol             →  alcohol
+    ingredients/ingrédients: alcohol             →  alcohol  (belt-and-suspenders)
     """
     token = token.strip()
     if not token:
         return ''
 
-    # ── 1. Residual HTML entities inside individual tokens ─────────────────
+    # ── 1. Residual HTML entities ──────────────────────────────────────────
     token = _html_module.unescape(token)
 
-    # ── 2. Strip leading quote characters ──────────────────────────────────
+    # ── 2. Drop disclaimer / legal notice tokens ───────────────────────────
+    _DISCLAIMERS = (
+        "list of ingredients is subject to change",
+        "subject to change",
+        "please consult the packaging",
+        "may vary",
+        "ingredients may vary",
+    )
+    tl = token.lower()
+    if any(d in tl for d in _DISCLAIMERS):
+        return ''
+
+    # ── 3. Strip leading quote characters ──────────────────────────────────
     token = re.sub(r'^["\'\u2018\u2019\u201c\u201d]+', '', token)
 
-    # ── 3. Strip CI / shade-number prefixes ────────────────────────────────
-    #   #01:   #01   #09247/a   #16153   (with or without colon)
+    # ── 4. Strip leading & or + continuation operators ─────────────────────
+    #   "& red 7 (ci 15850)"  →  "red 7 (ci 15850)"
+    #   "+ xanthan gum"       →  "xanthan gum"
+    token = re.sub(r'^[&+]\s+', '', token)
+
+    # ── 5. Strip CI / shade-number prefixes ────────────────────────────────
+    #   #01:  #09247/a  #16153  (with or without colon/space)
     token = re.sub(r'^#\d+(?:/\w+)?\s*:?\s*', '', token)
 
-    # ── 4. Strip parenthetical section/shade headers ───────────────────────
-    #   (+/ shade name:  (* step label:  ( section:)  ( section:
-    #   Matches: opening '(' + optional '+','*','/' chars + text without ')' or ':' + ':'
-    token = re.sub(r'^\([\+\*]?/?[^):]*:\)?\s*', '', token)
+    # ── 6. Strip parenthetical section/shade headers ───────────────────────
+    #   (+/ shade:   (* step:   ( section:)   (unclosed)
+    token = re.sub(r'^\([\+\*]?[-/+]*[^):]*:\)?\s*', '', token)
 
-    # ── 5. Unwrap balanced parentheticals with no colon ────────────────────
+    # ── 6b. Strip closed-paren-then-colon prefixes ─────────────────────────
+    #   (+/-): titanium dioxide ci 77891  →  titanium dioxide ci 77891
+    #   Only fires when ')' is followed by ':' (distinguishes from step 8).
+    token = re.sub(r'^\([^)]*\)\s*:\s*', '', token)
+
+    # ── 7. Strip concentration / numbered-list prefixes ────────────────────
+    #   (1%); hydrolyzed pea protein   →  hydrolyzed pea protein
+    #   (1) polybutylene terephthalate →  polybutylene terephthalate
+    #   (0.5%) retinol                 →  retinol
+    token = re.sub(r'^\(\d+\.?\d*%?\)\s*;?\s*', '', token)
+
+    # ── 8. Unwrap balanced parentheticals with no colon ────────────────────
     #   ( theobroma cacao )  →  theobroma cacao
     m = re.match(r'^\(\s*([^()]+?)\s*\)$', token)
     if m:
         token = m.group(1).strip()
 
-    # ── 6. Drop tokens that are only stray bracket/operator chars ──────────
-    if re.match(r'^[\(\)\+\*/\\]+\s*$', token):
+    # ── 9. Drop tokens that are only stray bracket/operator chars ──────────
+    if re.match(r'^[\(\)\+\*/\\&-]+\s*$', token):
         return ''
 
-    # ── 7. Strip product-name-colon prefix ─────────────────────────────────
-    #   Fires when: prefix contains ≥1 space (multi-word), has no comma,
-    #   and is followed by ': ' then a letter.
-    #   Catches:  curl gel: …   'replica' beach walk: …   'i can begin' shampoo: …
-    #             ingredients/ingrédients: …   (belt-and-suspenders)
+    # ── 10. Strip product-name-colon prefix ────────────────────────────────
+    #   Fires when prefix contains ≥1 space and is followed by ': ' + letter.
+    #   Catches:  curl gel: …   'replica' beach walk: …   shampoo name: water …
     token = re.sub(r'^[^,]*\s[^,:]*:\s+(?=[a-z])', '', token)
 
     return token.strip()
